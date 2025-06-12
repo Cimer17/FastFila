@@ -12,7 +12,7 @@ import markdown as md
 import openai
 
 # Путь к файлу базы данных SQLite
-DB_PATH = "datafila/questions.db"
+DB_PATH = "/datafila/questions.db"
 # Путь к файлу со списком вопросов
 QUESTIONS_FILE_PATH = "questions.txt"
 
@@ -20,8 +20,6 @@ QUESTIONS_FILE_PATH = "questions.txt"
 openai_client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 def get_db():
-    """Гарантируем, что папка для БД есть, и возвращаем соединение."""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
