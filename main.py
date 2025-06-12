@@ -11,7 +11,7 @@ import openai
 import os
 
 # Путь к файлу базы данных SQLite (без URI-префикса)
-DB_PATH = "datafila/questions.db"
+DB_PATH = "sqlite:////datafila/questions.db"
 # Путь к файлу со списком вопросов
 QUESTIONS_FILE_PATH = "questions.txt"
 
