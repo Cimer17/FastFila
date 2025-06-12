@@ -1,3 +1,6 @@
+import os
+import asyncio
+import sqlite3
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException
@@ -5,12 +8,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
 
-import sqlite3
 import markdown as md
 import openai
-import os
 
-# Путь к файлу базы данных SQLite (без URI-префикса)
+# Путь к файлу базы данных SQLite
 DB_PATH = "datafila/questions.db"
 # Путь к файлу со списком вопросов
 QUESTIONS_FILE_PATH = "questions.txt"
@@ -19,7 +20,7 @@ QUESTIONS_FILE_PATH = "questions.txt"
 openai_client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 def get_db():
-    """Возвращает соединение с SQLite и настраивает row_factory."""
+    """Гарантируем, что папка для БД есть, и возвращаем соединение."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -27,28 +28,28 @@ def get_db():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # При старте приложения — создаём таблицу, если она ещё не существует
+    # При старте — создаём таблицу, если её ещё нет
     print("Запуск приложения...")
     conn = get_db()
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS questions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
             title   TEXT NOT NULL UNIQUE,
             content TEXT NOT NULL
         )
     """)
     conn.commit()
     conn.close()
-    print(f"База данных '{DB_PATH}' успешно инициализирована.")
+    print(f"БД '{DB_PATH}' инициализирована.")
     yield
-    # При завершении приложения
+    # При завершении
     print("Приложение завершает работу.")
 
-# Единственный экземпляр FastAPI с lifespan-хэндлером
+# Основной FastAPI-инстанс
 app = FastAPI(lifespan=lifespan)
 
-# CORS
+# CORS-настройки
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -57,7 +58,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
+# Шаблоны Jinja2
 templates = Jinja2Templates(directory="templates")
 
 
@@ -69,13 +70,11 @@ async def list_questions(request: Request, q: str = ""):
 
     if q:
         q_lower = q.lower()
-        filtered = [r for r in rows if q_lower in r["title"].lower()]
-    else:
-        filtered = rows
+        rows = [r for r in rows if q_lower in r["title"].lower()]
 
     return templates.TemplateResponse(
         "index.html",
-        {"request": request, "questions": filtered, "q": q}
+        {"request": request, "questions": rows, "q": q}
     )
 
 
@@ -99,18 +98,18 @@ async def question_detail(request: Request, question_id: int):
 
 
 @app.post("/seed_questions")
-async def seed_questions_from_file():
-    # Проверяем файл с вопросами
+async def seed_questions_from_file(request: Request):
+    # Проверяем наличие файла с вопросами
     if not os.path.exists(QUESTIONS_FILE_PATH):
         raise HTTPException(
             status_code=404,
-            detail=f"Файл с вопросами '{QUESTIONS_FILE_PATH}' не найден."
+            detail=f"Файл '{QUESTIONS_FILE_PATH}' не найден."
         )
-    # Проверяем OPENAI_API_KEY
+    # Проверяем API-ключ
     if not os.environ.get("OPENAI_API_KEY"):
         raise HTTPException(
             status_code=500,
-            detail="OPENAI_API_KEY не установлен в переменных окружения."
+            detail="OPENAI_API_KEY не установлен."
         )
 
     processed_count = 0
@@ -123,8 +122,19 @@ async def seed_questions_from_file():
     cursor = conn.cursor()
 
     for title in questions_to_process:
+        # Прерываем, если клиент закрыл соединение
+        if await request.is_disconnected():
+            conn.close()
+            return JSONResponse(
+                status_code=499,
+                content={
+                    "message": (
+                        f"Клиент отменил операцию после обработки {processed_count} вопросов."
+                    )
+                }
+            )
         try:
-            # Избегаем дубликатов
+            # Пропускаем дубликаты
             cursor.execute("SELECT id FROM questions WHERE title = ?", (title,))
             if cursor.fetchone():
                 processed_count += 1
@@ -134,21 +144,21 @@ async def seed_questions_from_file():
                 {
                     "role": "system",
                     "content": (
-                        "Ты - глубокомысленный философ, способный анализировать сложные идеи "
+                        "Ты — глубокомысленный философ, способный анализировать сложные идеи "
                         "и выражать их ясно и доступно в формате Markdown. Твой ответ должен "
-                        "быть полным и содержательным, но не чрезмерно длинным, сосредоточься "
-                        "на основных философских аспектах. Используй стандартный Markdown "
-                        "для форматирования текста (заголовки, списки, курсив, жирный текст)."
+                        "быть полным и содержательным, но не чрезмерно длинным. Используй "
+                        "заголовки, списки, курсив и жирный текст."
                     )
                 },
                 {
                     "role": "user",
-                    "content": f"Пожалуйста, дай философский ответ на следующий вопрос: {title}"
+                    "content": f"Пожалуйста, дай философский ответ на вопрос: {title}"
                 }
             ]
 
             print(f"Запрашиваю ответ у OpenAI для: '{title}'...")
-            response = await openai_client.chat.completions.create(
+            response = await asyncio.to_thread(
+                openai_client.chat.completions.create,
                 model="gpt-4o",
                 messages=prompt_messages,
                 max_tokens=1000,
@@ -176,8 +186,7 @@ async def seed_questions_from_file():
             status_code=207,
             content={
                 "message": (
-                    f"Процесс завершен: успешно {processed_count}, "
-                    f"не удалось {len(failed_questions)}."
+                    f"Процесс завершен: успешно {processed_count}, не удалось {len(failed_questions)}."
                 ),
                 "failed_questions": failed_questions
             }
@@ -185,5 +194,5 @@ async def seed_questions_from_file():
 
     return JSONResponse(
         status_code=200,
-        content={"message": f"Все {processed_count} вопросов успешно обработаны."}
+        content={"message": f"Все {processed_count} вопросов успешно добавлены."}
     )
