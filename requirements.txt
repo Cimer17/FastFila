@@ -1,4 +1,5 @@
 openai
 fastapi
 fastapi[standard]
+uvicorn[standard]
 markdown
